@@ -1,20 +1,5 @@
-/**
- * Non-blocking model auto-refresh for plugin startup.
- *
- * Discovers currently available models from cursor-agent and merges them
- * into the opencode.json config. Only adds new models — never removes
- * user-configured ones. Safe to call fire-and-forget; all errors are
- * caught and logged silently.
- */
-import {
-  existsSync as nodeExistsSync,
-  readFileSync as nodeReadFileSync,
-  writeFileSync as nodeWriteFileSync,
-} from "node:fs";
 import { discoverModelsFromCursorAgent, type DiscoveredModel } from "../cli/model-discovery.js";
-import { resolveOpenCodeConfigPath } from "../plugin-toggle.js";
 import { createLogger, type Logger } from "../utils/logger.js";
-import { parseJsonc } from "../utils/parse-jsonc.js";
 
 const log = createLogger("model-sync");
 const PROVIDER_ID = "cursor-acp";
@@ -24,37 +9,26 @@ type ProviderConfig = { models?: Record<string, unknown> } & Record<string, unkn
 type OpenCodeConfig = {
   provider?: Record<string, ProviderConfig | undefined>;
 } & Record<string, unknown>;
-type AutoRefreshModelsDeps = {
-  defer: () => Promise<void>;
+type AutoDiscoverModelsDeps = {
   discoverModels: () => DiscoveredModel[];
-  env: NodeJS.ProcessEnv;
-  existsSync: (path: string) => boolean;
   log: Logger;
-  readFileSync: (path: string, encoding: BufferEncoding) => string;
-  writeFileSync: (path: string, data: string, encoding: BufferEncoding) => void;
 };
 
-const defaultDeps: AutoRefreshModelsDeps = {
-  defer: () => Promise.resolve(),
+export type AutoDiscoverModelsResult = {
+  added: number;
+  discovered: number;
+  total: number;
+  status: "updated" | "unchanged" | "skipped" | "failed";
+  reason?: string;
+};
+
+const defaultDeps: AutoDiscoverModelsDeps = {
   discoverModels: discoverModelsFromCursorAgent,
-  env: process.env,
-  existsSync: nodeExistsSync,
   log,
-  readFileSync: nodeReadFileSync,
-  writeFileSync: nodeWriteFileSync,
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function parseConfig(raw: string): OpenCodeConfig | null {
-  try {
-    const parsed = parseJsonc(raw);
-    return isRecord(parsed) ? (parsed as OpenCodeConfig) : null;
-  } catch {
-    return null;
-  }
 }
 
 function getProviderConfig(config: OpenCodeConfig): ProviderConfig | null {
@@ -70,50 +44,30 @@ function getExistingModels(provider: ProviderConfig): Record<string, unknown> {
   return isRecord(provider.models) ? { ...provider.models } : {};
 }
 
-function yieldForFireAndForget(): Promise<void> {
-  return Promise.resolve();
-}
-
 /**
- * Auto-refresh models at plugin startup.
+ * Auto-discover models into OpenCode's runtime config.
  *
- * - Reads the current opencode.json config
  * - Queries cursor-agent for available models
- * - Merges discovered models into the provider config (additive only)
- * - Writes back if any new models were added
+ * - Merges discovered models into the in-memory provider config (additive only)
+ * - Never writes opencode.json, preserving JSONC comments on disk
  *
- * This function never throws. All failures are logged at debug level
- * and silently ignored so plugin startup is never blocked.
+ * This function never throws. All failures are logged at debug level and
+ * silently ignored so plugin startup is never blocked.
  */
-export async function autoRefreshModels(
-  deps: Partial<AutoRefreshModelsDeps> = {},
-): Promise<void> {
-  const resolvedDeps: AutoRefreshModelsDeps = {
+export function autoDiscoverModels(
+  config: OpenCodeConfig,
+  deps: Partial<AutoDiscoverModelsDeps> = {},
+): AutoDiscoverModelsResult {
+  const resolvedDeps: AutoDiscoverModelsDeps = {
     ...defaultDeps,
-    defer: yieldForFireAndForget,
     ...deps,
   };
 
-  await resolvedDeps.defer();
-
   try {
-    const configPath = resolveOpenCodeConfigPath(resolvedDeps.env);
-    if (!resolvedDeps.existsSync(configPath)) {
-      resolvedDeps.log.debug("Config file not found, skipping model auto-refresh", { configPath });
-      return;
-    }
-
-    const raw = resolvedDeps.readFileSync(configPath, "utf8");
-    const config = parseConfig(raw);
-    if (!config) {
-      resolvedDeps.log.debug("Config file is not valid JSON, skipping model auto-refresh");
-      return;
-    }
-
     const provider = getProviderConfig(config);
     if (!provider) {
-      resolvedDeps.log.debug("Provider section not found in config, skipping model auto-refresh");
-      return;
+      resolvedDeps.log.debug("Provider section not found in runtime config, skipping model auto-discovery");
+      return { added: 0, discovered: 0, total: 0, status: "skipped", reason: "missing_provider" };
     }
 
     const existingModels = getExistingModels(provider);
@@ -121,10 +75,16 @@ export async function autoRefreshModels(
     try {
       discovered = resolvedDeps.discoverModels();
     } catch (err) {
-      resolvedDeps.log.debug("cursor-agent model discovery failed, skipping auto-refresh", {
+      resolvedDeps.log.debug("cursor-agent model discovery failed, skipping runtime auto-discovery", {
         error: String(err),
       });
-      return;
+      return {
+        added: 0,
+        discovered: 0,
+        total: Object.keys(existingModels).length,
+        status: "failed",
+        reason: "discovery_failed",
+      };
     }
 
     let addedCount = 0;
@@ -135,20 +95,32 @@ export async function autoRefreshModels(
     }
 
     if (addedCount === 0) {
-      resolvedDeps.log.debug("Model auto-refresh: no new models found", {
+      resolvedDeps.log.debug("Runtime model auto-discovery: no new models found", {
         existing: Object.keys(existingModels).length,
         discovered: discovered.length,
       });
-      return;
+      return {
+        added: 0,
+        discovered: discovered.length,
+        total: Object.keys(existingModels).length,
+        status: "unchanged",
+      };
     }
 
     provider.models = existingModels;
-    resolvedDeps.writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`, "utf8");
-    resolvedDeps.log.info("Model auto-refresh: added new models", {
+    resolvedDeps.log.info("Runtime model auto-discovery: added new models", {
       added: addedCount,
       total: Object.keys(existingModels).length,
     });
+
+    return {
+      added: addedCount,
+      discovered: discovered.length,
+      total: Object.keys(existingModels).length,
+      status: "updated",
+    };
   } catch (err) {
-    resolvedDeps.log.debug("Model auto-refresh failed", { error: String(err) });
+    resolvedDeps.log.debug("Runtime model auto-discovery failed", { error: String(err) });
+    return { added: 0, discovered: 0, total: 0, status: "failed", reason: "unexpected_error" };
   }
 }

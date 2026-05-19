@@ -29,7 +29,7 @@ import { toOpenAiParameters, describeTool } from "./tools/schema.js";
 import { ToolRouter } from "./tools/router.js";
 import { SkillLoader } from "./tools/skills/loader.js";
 import { SkillResolver } from "./tools/skills/resolver.js";
-import { autoRefreshModels } from "./models/sync.js";
+import { autoDiscoverModels } from "./models/sync.js";
 import { readMcpConfigs, readSubagentNames } from "./mcp/config.js";
 import { McpClientManager } from "./mcp/client-manager.js";
 import { buildMcpToolHookEntries, buildMcpToolDefinitions } from "./mcp/tool-bridge.js";
@@ -1925,9 +1925,6 @@ export const CursorPlugin: Plugin = async ({ $, directory, worktree, client, ser
   });
   await ensurePluginDirectory();
 
-  // Auto-refresh model list from cursor-agent (non-blocking, fire-and-forget)
-  autoRefreshModels().catch(() => {});
-
   // MCP tool bridge: connect to MCP servers and register their tools.
   // We await init so tools are available before the plugin returns its tool hook.
   const mcpManager = new McpClientManager();
@@ -2094,6 +2091,10 @@ export const CursorPlugin: Plugin = async ({ $, directory, worktree, client, ser
   const toolHookEntries = buildToolHookEntries(localRegistry, workspaceDirectory);
 
   return {
+    async config(input: any) {
+      autoDiscoverModels(input);
+    },
+
     tool: { ...toolHookEntries, ...mcpToolEntries },
     auth: {
       provider: CURSOR_PROVIDER_ID,

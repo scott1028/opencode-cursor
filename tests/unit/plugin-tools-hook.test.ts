@@ -46,6 +46,8 @@ describe("Plugin tool hook", () => {
     // Verify tool hook exists
     expect(hooks.tool).toBeDefined();
     expect(typeof hooks.tool).toBe("object");
+    expect(hooks.config).toBeDefined();
+    expect(typeof hooks.config).toBe("function");
 
     // Verify default tools are registered
     const toolNames = Object.keys(hooks.tool || {});

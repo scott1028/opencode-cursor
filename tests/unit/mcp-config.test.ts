@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { readSubagentNames } from "../../src/mcp/config.js";
+import { readMcpConfigs, readSubagentNames } from "../../src/mcp/config.js";
 
 describe("readSubagentNames", () => {
   it("returns only mode:subagent agents when some exist", () => {
@@ -39,5 +39,39 @@ describe("readSubagentNames", () => {
 
   it("returns general-purpose when config is malformed JSON", () => {
     expect(readSubagentNames({ configJson: "{ bad json" })).toEqual(["general-purpose"]);
+  });
+
+  it("accepts JSONC with comments and trailing commas", () => {
+    const config = `{
+      // subagents only
+      "agent": {
+        "review": { "mode": "subagent", "model": "google/gemini" }, // trailing comma OK
+      },
+    }`;
+    expect(readSubagentNames({ configJson: config })).toEqual(["review"]);
+  });
+});
+
+describe("readMcpConfigs JSONC support", () => {
+  it("parses comments and trailing commas in mcp section", () => {
+    const config = `{
+      // mcp servers
+      "mcp": {
+        "fs": {
+          "type": "local",
+          "command": ["mcp-server-fs", "--root", "/tmp"], // local server
+        },
+      },
+    }`;
+    const result = readMcpConfigs({ configJson: config });
+    expect(result).toEqual([
+      {
+        name: "fs",
+        type: "local",
+        command: ["mcp-server-fs", "--root", "/tmp"],
+        environment: undefined,
+        timeout: undefined,
+      },
+    ]);
   });
 });

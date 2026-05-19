@@ -7,6 +7,7 @@ import {
   lstatSync,
   mkdirSync,
   realpathSync,
+  readlinkSync,
   readFileSync,
   rmSync,
   symlinkSync,
@@ -20,6 +21,7 @@ import {
   fallbackModels,
 } from "./model-discovery.js";
 import { resolveCursorAgentBinary } from "../utils/binary.js";
+import { parseJsonc } from "../utils/parse-jsonc.js";
 import { groupCursorModels, mergeCursorModelEntries } from "../models/variants.js";
 import type { DiscoveredModel } from "./model-discovery.js";
 
@@ -158,7 +160,7 @@ function checkPluginFile(pluginPath: string, config: unknown): CheckResult {
     }
     const stat = lstatSync(pluginPath);
     if (stat.isSymbolicLink()) {
-      const target = readFileSync(pluginPath, "utf8");
+      const target = readlinkSync(pluginPath);
       return { name: "Plugin file", passed: true, message: `symlink → ${target}` };
     }
     return { name: "Plugin file", passed: true, message: "file (copy)" };
@@ -416,7 +418,7 @@ function readConfig(configPath: string): any {
     throw error;
   }
   try {
-    return JSON.parse(raw);
+    return parseJsonc(raw);
   } catch (error) {
     throw new Error(`Invalid JSON in config: ${configPath} (${String(error)})`);
   }
@@ -758,7 +760,7 @@ export function getStatusResult(configPath: string, pluginPath: string): StatusR
       pluginType = stat.isSymbolicLink() ? "symlink" : "file";
       if (pluginType === "symlink") {
         try {
-          pluginTarget = readFileSync(pluginPath, "utf8");
+          pluginTarget = readlinkSync(pluginPath);
         } catch {
           pluginTarget = undefined;
         }

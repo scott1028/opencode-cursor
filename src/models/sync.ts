@@ -14,6 +14,7 @@ import {
 import { discoverModelsFromCursorAgent, type DiscoveredModel } from "../cli/model-discovery.js";
 import { resolveOpenCodeConfigPath } from "../plugin-toggle.js";
 import { createLogger, type Logger } from "../utils/logger.js";
+import { parseJsonc } from "../utils/parse-jsonc.js";
 
 const log = createLogger("model-sync");
 const PROVIDER_ID = "cursor-acp";
@@ -49,7 +50,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function parseConfig(raw: string): OpenCodeConfig | null {
   try {
-    const parsed = JSON.parse(raw);
+    const parsed = parseJsonc(raw);
     return isRecord(parsed) ? (parsed as OpenCodeConfig) : null;
   } catch {
     return null;

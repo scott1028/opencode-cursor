@@ -1,6 +1,6 @@
 // tests/unit/cli/opencode-cursor.test.ts
 import { describe, expect, it } from "bun:test";
-import { closeSync, mkdtempSync, openSync, rmSync, symlinkSync } from "node:fs";
+import { closeSync, mkdtempSync, openSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -89,6 +89,22 @@ describe("cli/opencode-cursor status", () => {
     expect(result).toHaveProperty("plugin");
     expect(result).toHaveProperty("provider");
     expect(result).toHaveProperty("aiSdk");
+  });
+
+  it("reports the symlink target instead of reading the plugin file contents", () => {
+    const dir = mkdtempSync(join(tmpdir(), "open-cursor-status-"));
+    const pluginSource = join(dir, "plugin-entry.js");
+    const pluginPath = join(dir, "cursor-acp.js");
+    writeFileSync(pluginSource, "export default {}", "utf8");
+    symlinkSync(pluginSource, pluginPath);
+
+    try {
+      const result = getStatusResult(join(dir, "opencode.json"), pluginPath);
+      expect(result.plugin.type).toBe("symlink");
+      expect(result.plugin.target).toBe(pluginSource);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

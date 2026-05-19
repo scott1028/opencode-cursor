@@ -6,6 +6,7 @@ import {
   discoverModelsFromCursorAgent,
   fallbackModels,
 } from "./model-discovery.js";
+import { parseJsonc } from "../utils/parse-jsonc.js";
 
 async function main() {
   console.log("Discovering Cursor models...");
@@ -30,7 +31,7 @@ async function main() {
     process.exit(1);
   }
 
-  const existingConfig = JSON.parse(readFileSync(configPath, "utf-8"));
+  const existingConfig = parseJsonc(readFileSync(configPath, "utf-8"));
 
   // Update cursor-acp provider models
   if (existingConfig.provider?.["cursor-acp"]) {

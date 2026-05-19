@@ -4,6 +4,7 @@ import {
 } from "node:fs";
 import { resolveOpenCodeConfigPath } from "../plugin-toggle.js";
 import { createLogger } from "../utils/logger.js";
+import { parseJsonc } from "../utils/parse-jsonc.js";
 
 const log = createLogger("mcp:config");
 
@@ -51,7 +52,7 @@ export function readMcpConfigs(deps: ReadMcpConfigsDeps = {}): McpServerConfig[]
 
   let parsed: Record<string, unknown>;
   try {
-    parsed = JSON.parse(raw);
+    parsed = parseJsonc(raw);
   } catch {
     return [];
   }
@@ -119,7 +120,7 @@ export function readSubagentNames(deps: ReadSubagentNamesDeps = {}): string[] {
 
   let parsed: Record<string, unknown>;
   try {
-    parsed = JSON.parse(raw);
+    parsed = parseJsonc(raw);
   } catch {
     return ["general-purpose"];
   }

@@ -51,6 +51,23 @@ const EDIT_TOOL = {
   },
 };
 
+const WRITE_TOOL = {
+  type: "function",
+  function: {
+    name: "write",
+    description: "Write a file",
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string" },
+        content: { type: "string" },
+      },
+      required: ["path", "content"],
+      additionalProperties: false,
+    },
+  },
+};
+
 const MOCK_CURSOR_AGENT = `#!/usr/bin/env node
 const fs = require("fs");
 
@@ -397,7 +414,29 @@ describe("OpenCode-owned tool loop integration", () => {
     expect(json.choices?.[0]?.finish_reason).toBe("tool_calls");
   });
 
-  it("skips non-streaming edit content payloads without old_string", async () => {
+  it("reroutes non-streaming edit content payloads to write when write is available", async () => {
+    process.env.MOCK_CURSOR_SCENARIO = "tool-edit-invalid";
+    process.env.MOCK_CURSOR_PROMPT_FILE = "";
+
+    const response = await requestCompletion(baseURL, {
+      model: "auto",
+      stream: false,
+      tools: [EDIT_TOOL, WRITE_TOOL],
+      messages: [{ role: "user", content: "Edit TODO.md" }],
+    });
+
+    const json: any = await response.json();
+    const toolCall = json.choices?.[0]?.message?.tool_calls?.[0];
+    expect(toolCall?.function?.name).toBe("write");
+    expect(JSON.parse(toolCall.function.arguments)).toEqual({
+      path: "TODO.md",
+      content: "full rewrite",
+    });
+    expect(json.choices?.[0]?.finish_reason).toBe("tool_calls");
+    expect(json.choices?.[0]?.message?.content).toBeNull();
+  });
+
+  it("skips non-streaming edit content payloads without old_string when write is unavailable", async () => {
     process.env.MOCK_CURSOR_SCENARIO = "tool-edit-invalid";
     process.env.MOCK_CURSOR_PROMPT_FILE = "";
 

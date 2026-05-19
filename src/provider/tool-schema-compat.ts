@@ -55,6 +55,11 @@ export interface ToolSchemaCompatResult {
   validation: ToolSchemaValidationResult;
 }
 
+interface ToolSpecificNormalization {
+  toolName: string;
+  args: JsonRecord;
+}
+
 export function buildToolSchemaMap(tools: Array<unknown>): Map<string, unknown> {
   const schemas = new Map<string, unknown>();
   for (const rawTool of tools) {
@@ -81,11 +86,15 @@ export function applyToolSchemaCompat(
   const parsedArgs = parseArguments(toolCall.function.arguments);
   const originalArgKeys = Object.keys(parsedArgs);
   const { normalizedArgs, collisionKeys } = normalizeArgumentKeys(parsedArgs);
-  const toolSpecificArgs = normalizeToolSpecificArgs(toolCall.function.name, normalizedArgs);
-  const schema = toolSchemaMap.get(toolCall.function.name);
-  const sanitization = sanitizeArgumentsForSchema(toolSpecificArgs, schema);
-  const validation = validateToolArguments(
+  const toolSpecific = normalizeToolSpecificCall(
     toolCall.function.name,
+    normalizedArgs,
+    toolSchemaMap,
+  );
+  const schema = toolSchemaMap.get(toolSpecific.toolName);
+  const sanitization = sanitizeArgumentsForSchema(toolSpecific.args, schema);
+  const validation = validateToolArguments(
+    toolSpecific.toolName,
     sanitization.args,
     schema,
     sanitization.unexpected,
@@ -95,6 +104,7 @@ export function applyToolSchemaCompat(
     ...toolCall,
     function: {
       ...toolCall.function,
+      name: toolSpecific.toolName,
       arguments: JSON.stringify(sanitization.args),
     },
   };
@@ -154,7 +164,11 @@ function resolveCanonicalArgKey(rawKey: string): string | null {
   return ARG_KEY_ALIASES.get(token) ?? null;
 }
 
-function normalizeToolSpecificArgs(toolName: string, args: JsonRecord): JsonRecord {
+function normalizeToolSpecificCall(
+  toolName: string,
+  args: JsonRecord,
+  toolSchemaMap: Map<string, unknown>,
+): ToolSpecificNormalization {
   const normalizedToolName = toolName.toLowerCase();
   if (normalizedToolName === "bash") {
     const normalized: JsonRecord = { ...args };
@@ -169,7 +183,7 @@ function normalizeToolSpecificArgs(toolName: string, args: JsonRecord): JsonReco
     ) {
       normalized.cwd = normalized.path;
     }
-    return normalized;
+    return { toolName, args: normalized };
   }
 
   if (normalizedToolName === "rm") {
@@ -182,12 +196,12 @@ function normalizeToolSpecificArgs(toolName: string, args: JsonRecord): JsonReco
         normalized.force = false;
       }
     }
-    return normalized;
+    return { toolName, args: normalized };
   }
 
   if (normalizedToolName === "todowrite") {
     if (!Array.isArray(args.todos)) {
-      return args;
+      return { toolName, args };
     }
 
     const todos = args.todos.map((entry) => {
@@ -209,10 +223,7 @@ function normalizeToolSpecificArgs(toolName: string, args: JsonRecord): JsonReco
       return todo;
     });
 
-    return {
-      ...args,
-      todos,
-    };
+    return { toolName, args: { ...args, todos } };
   }
 
   if (normalizedToolName === "write") {
@@ -235,11 +246,11 @@ function normalizeToolSpecificArgs(toolName: string, args: JsonRecord): JsonReco
       }
     }
 
-    return normalized;
+    return { toolName, args: normalized };
   }
 
   if (normalizedToolName !== "edit" || !EDIT_COMPAT_REPAIR_ENABLED) {
-    return args;
+    return { toolName, args };
   }
 
   const repaired: JsonRecord = { ...args };
@@ -261,11 +272,45 @@ function normalizeToolSpecificArgs(toolName: string, args: JsonRecord): JsonReco
   if (!hasStringNew && typeof content === "string") {
     repaired.new_string = content;
   }
+
+  const writeArgs = buildWriteArgsFromEditPayload(repaired, toolSchemaMap);
+  if (writeArgs) {
+    return { toolName: "write", args: writeArgs };
+  }
+
   if (hasStringOld && repaired.old_string === "") {
     delete repaired.old_string;
   }
 
-  return repaired;
+  return { toolName, args: repaired };
+}
+
+function buildWriteArgsFromEditPayload(
+  args: JsonRecord,
+  toolSchemaMap: Map<string, unknown>,
+): JsonRecord | null {
+  if (!toolSchemaMap.has("write")) {
+    return null;
+  }
+
+  const path = typeof args.path === "string" && args.path.trim().length > 0
+    ? args.path
+    : null;
+  if (!path) {
+    return null;
+  }
+
+  const oldString = typeof args.old_string === "string" ? args.old_string : undefined;
+  if (oldString !== undefined && oldString.length > 0) {
+    return null;
+  }
+
+  const content = coerceToString(args.content ?? args.new_string);
+  if (content === null) {
+    return null;
+  }
+
+  return { path, content };
 }
 
 function normalizeBashCommand(value: unknown): string | null {
@@ -423,7 +468,7 @@ function buildRepairHint(
     toolName.toLowerCase() === "edit"
     && (missing.includes("old_string") || missing.includes("new_string"))
   ) {
-    hints.push("edit requires path, old_string, and new_string");
+    hints.push("use write with path and content for full-file replacement; edit requires path, old_string, and new_string for targeted replacement");
   }
   return hints.join(" | ");
 }

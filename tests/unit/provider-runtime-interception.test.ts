@@ -278,8 +278,8 @@ describe("provider runtime interception fallback", () => {
     expect(interceptedArgs).toContain("\"content\":\"hello\"");
   });
 
-  it("emits a non-fatal hint for edit content payloads without old_string in v1", async () => {
-    let interceptedCount = 0;
+  it("reroutes edit content payloads without old_string to write in v1", async () => {
+    let interceptedToolCall: any;
     const toolResults: any[] = [];
     const result = await handleToolLoopEventV1({
       ...createBaseOptions({
@@ -292,7 +292,7 @@ describe("provider runtime interception fallback", () => {
             },
           },
         } as any,
-        allowedToolNames: new Set(["edit"]),
+        allowedToolNames: new Set(["edit", "write"]),
         toolSchemaMap: new Map([
           [
             "edit",
@@ -307,26 +307,40 @@ describe("provider runtime interception fallback", () => {
               additionalProperties: false,
             },
           ],
+          [
+            "write",
+            {
+              type: "object",
+              properties: {
+                path: { type: "string" },
+                content: { type: "string" },
+              },
+              required: ["path", "content"],
+              additionalProperties: false,
+            },
+          ],
         ]),
         onToolResult: async (toolResult) => {
           toolResults.push(toolResult);
         },
-        onInterceptedToolCall: async () => {
-          interceptedCount += 1;
+        onInterceptedToolCall: async (toolCall) => {
+          interceptedToolCall = toolCall;
         },
       }),
       boundary: createProviderBoundary("v1", "cursor-acp"),
     });
 
-    expect(result).toEqual({ intercepted: false, skipConverter: true });
-    expect(interceptedCount).toBe(0);
-    expect(toolResults).toHaveLength(1);
-    expect(toolResults[0]?.choices?.[0]?.delta?.content).toContain("Skipped malformed tool call");
-    expect(toolResults[0]?.choices?.[0]?.delta?.content).toContain("old_string");
+    expect(result).toEqual({ intercepted: true, skipConverter: true });
+    expect(interceptedToolCall?.function?.name).toBe("write");
+    expect(JSON.parse(interceptedToolCall.function.arguments)).toEqual({
+      path: "TODO.md",
+      content: "full rewrite",
+    });
+    expect(toolResults).toHaveLength(0);
   });
 
-  it("emits a non-fatal hint for explicit empty edit old_string in v1", async () => {
-    let interceptedCount = 0;
+  it("reroutes explicit empty edit old_string to write in v1", async () => {
+    let interceptedToolCall: any;
     const toolResults: any[] = [];
     const result = await handleToolLoopEventV1({
       ...createBaseOptions({
@@ -343,7 +357,7 @@ describe("provider runtime interception fallback", () => {
             },
           },
         } as any,
-        allowedToolNames: new Set(["edit"]),
+        allowedToolNames: new Set(["edit", "write"]),
         toolSchemaMap: new Map([
           [
             "edit",
@@ -358,22 +372,36 @@ describe("provider runtime interception fallback", () => {
               additionalProperties: false,
             },
           ],
+          [
+            "write",
+            {
+              type: "object",
+              properties: {
+                path: { type: "string" },
+                content: { type: "string" },
+              },
+              required: ["path", "content"],
+              additionalProperties: false,
+            },
+          ],
         ]),
         onToolResult: async (toolResult) => {
           toolResults.push(toolResult);
         },
-        onInterceptedToolCall: async () => {
-          interceptedCount += 1;
+        onInterceptedToolCall: async (toolCall) => {
+          interceptedToolCall = toolCall;
         },
       }),
       boundary: createProviderBoundary("v1", "cursor-acp"),
     });
 
-    expect(result).toEqual({ intercepted: false, skipConverter: true });
-    expect(interceptedCount).toBe(0);
-    expect(toolResults).toHaveLength(1);
-    expect(toolResults[0]?.choices?.[0]?.delta?.content).toContain("Skipped malformed tool call");
-    expect(toolResults[0]?.choices?.[0]?.delta?.content).toContain("old_string");
+    expect(result).toEqual({ intercepted: true, skipConverter: true });
+    expect(interceptedToolCall?.function?.name).toBe("write");
+    expect(JSON.parse(interceptedToolCall.function.arguments)).toEqual({
+      path: "TODO.md",
+      content: "-- test\nreturn {",
+    });
+    expect(toolResults).toHaveLength(0);
   });
 
   it("emits a non-fatal hint and skips malformed edit execution in v1 pass-through mode", async () => {

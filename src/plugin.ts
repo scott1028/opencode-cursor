@@ -8,6 +8,7 @@ import { isAbsolute, join, relative, resolve } from "path";
 import { ToolMapper, type ToolUpdate } from "./acp/tools.js";
 import { startCursorOAuth } from "./auth";
 import { LineBuffer } from "./streaming/line-buffer.js";
+import { MixedDeltaTracker } from "./streaming/delta-tracker.js";
 import { StreamToSseConverter, formatSseDone } from "./streaming/openai-sse.js";
 import { parseStreamJsonLine } from "./streaming/parser.js";
 import { extractText, extractThinking, isAssistantText, isResult, isThinking } from "./streaming/types.js";
@@ -57,7 +58,7 @@ import {
   parseToolLoopMaxRepeat,
   type ToolLoopGuard,
 } from "./provider/tool-loop-guard.js";
-import { resolveCursorAgentBinary } from "./utils/binary.js";
+import { formatShellCommandForPlatform, resolveCursorAgentBinary } from "./utils/binary.js";
 
 const log = createLogger("plugin");
 
@@ -444,6 +445,7 @@ export function extractCompletionFromStream(output: string): {
   let usage: OpenAiUsage | undefined;
   let sawAssistantPartials = false;
   let sawThinkingPartials = false;
+  const tracker = new MixedDeltaTracker();
 
   for (const line of lines) {
     const event = parseStreamJsonLine(line);
@@ -457,8 +459,8 @@ export function extractCompletionFromStream(output: string): {
 
       const isPartial = typeof (event as any).timestamp_ms === "number";
       if (isPartial) {
-        assistantText += text;
         sawAssistantPartials = true;
+        assistantText += tracker.nextText(text);
       } else if (!sawAssistantPartials) {
         assistantText = text;
       }
@@ -469,8 +471,8 @@ export function extractCompletionFromStream(output: string): {
       if (thinking) {
         const isPartial = typeof (event as any).timestamp_ms === "number";
         if (isPartial) {
-          reasoningText += thinking;
           sawThinkingPartials = true;
+          reasoningText += tracker.nextThinking(thinking);
         } else if (!sawThinkingPartials) {
           reasoningText = thinking;
         }
@@ -1238,7 +1240,7 @@ async function ensureCursorProxyServer(workspaceDirectory: string, toolRouter?: 
         cmd.push("--force");
       }
 
-      const child = spawn(cmd[0], cmd.slice(1), {
+      const child = spawn(formatShellCommandForPlatform(cmd[0]), cmd.slice(1), {
         stdio: ["pipe", "pipe", "pipe"],
         shell: process.platform === "win32",
       });
@@ -1415,19 +1417,17 @@ async function ensureCursorProxyServer(workspaceDirectory: string, toolRouter?: 
           }
         };
 
-        child.stdout.on("data", async (chunk) => {
-          if (streamTerminated || res.writableEnded) {
-            return;
-          }
-          if (!firstTokenReceived) { perf.mark("first-token"); firstTokenReceived = true; }
-          for (const line of lineBuffer.push(chunk)) {
-            if (streamTerminated || res.writableEnded) {
-              break;
-            }
+        const chunkQueue: Buffer[] = [];
+        let draining = false;
+        let childClosed = false;
+        let childCloseHandled = false;
+        let childExitCode: number | null = null;
+
+        const processLines = async (lines: string[]) => {
+          for (const line of lines) {
+            if (streamTerminated || res.writableEnded) break;
             const event = parseStreamJsonLine(line);
-            if (!event) {
-              continue;
-            }
+            if (!event) continue;
 
             if (isResult(event)) {
               usage = extractOpenAiUsageFromResult(event) ?? usage;
@@ -1469,156 +1469,104 @@ async function ensureCursorProxyServer(workspaceDirectory: string, toolRouter?: 
                 if (!result.terminate.silent) {
                   emitTerminalAssistantErrorAndTerminate(result.terminate.message);
                 } else {
-                  // Silent termination: just end the stream without an error message
                   streamTerminated = true;
                   try { child.kill(); } catch { /* ignore */ }
                 }
                 break;
               }
-              if (result.intercepted) {
-                break;
-              }
-              if (result.skipConverter) {
-                continue;
-              }
+              if (result.intercepted) break;
+              if (result.skipConverter) continue;
             }
 
-            if (streamTerminated || res.writableEnded) {
-              break;
-            }
+            if (streamTerminated || res.writableEnded) break;
             for (const sse of converter.handleEvent(event)) {
               res.write(sse);
             }
           }
+        };
+
+        const drainQueue = async () => {
+          if (draining) return;
+          draining = true;
+          try {
+            while (chunkQueue.length > 0) {
+              if (streamTerminated || res.writableEnded) break;
+              const chunk = chunkQueue.shift()!;
+              if (!firstTokenReceived) { perf.mark("first-token"); firstTokenReceived = true; }
+              await processLines(lineBuffer.push(chunk));
+            }
+
+            if (childClosed && !childCloseHandled && !streamTerminated && !res.writableEnded) {
+              childCloseHandled = true;
+              await processLines(lineBuffer.flush());
+              if (streamTerminated || res.writableEnded) return;
+
+              perf.mark("request:done");
+              perf.summarize();
+              const stderrText = Buffer.concat(stderrChunks).toString().trim();
+              log.debug("cursor-agent completed (node stream)", {
+                code: childExitCode,
+                stderrChars: stderrText.length,
+              });
+              if (childExitCode !== 0) {
+                const errSource =
+                  stderrText
+                  || `cursor-agent exited with code ${String(childExitCode ?? "unknown")} and no output`;
+                const parsed = parseAgentError(errSource);
+                const msg = formatErrorForUser(parsed);
+                const errChunk = createChatCompletionChunk(id, created, model, msg, true);
+                res.write(`data: ${JSON.stringify(errChunk)}\n\n`);
+                res.write(formatSseDone());
+                streamTerminated = true;
+                res.end();
+                return;
+              }
+
+              const passThroughSummary = passThroughTracker.getSummary();
+              if (passThroughSummary.hasActivity) {
+                await toastService.showPassThroughSummary(passThroughSummary.tools);
+              }
+              if (passThroughSummary.errors.length > 0) {
+                await toastService.showErrorSummary(passThroughSummary.errors);
+              }
+
+              const doneChunk = {
+                id,
+                object: "chat.completion.chunk",
+                created,
+                model,
+                choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+              };
+              res.write(`data: ${JSON.stringify(doneChunk)}\n\n`);
+              if (usage) {
+                const usageChunk = createChatCompletionUsageChunk(id, created, model, usage);
+                res.write(`data: ${JSON.stringify(usageChunk)}\n\n`);
+              }
+              res.write(formatSseDone());
+              streamTerminated = true;
+              res.end();
+            }
+          } finally {
+            draining = false;
+            if (
+              !streamTerminated
+              && !res.writableEnded
+              && (chunkQueue.length > 0 || (childClosed && !childCloseHandled))
+            ) {
+              drainQueue();
+            }
+          }
+        };
+
+        child.stdout.on("data", (chunk) => {
+          chunkQueue.push(Buffer.from(chunk));
+          drainQueue();
         });
 
-        child.on("close", async (code) => {
-          if (streamTerminated || res.writableEnded) {
-            return;
-          }
-          for (const line of lineBuffer.flush()) {
-            if (streamTerminated || res.writableEnded) {
-              break;
-            }
-            const event = parseStreamJsonLine(line);
-            if (!event) {
-              continue;
-            }
-
-            if (isResult(event)) {
-              usage = extractOpenAiUsageFromResult(event) ?? usage;
-            }
-
-            if (event.type === "tool_call") {
-              const result = await handleToolLoopEventWithFallback({
-                event: event as any,
-                boundary: boundaryContext.getBoundary(),
-                boundaryMode: boundaryContext.getBoundary().mode,
-                autoFallbackToLegacy: ENABLE_PROVIDER_BOUNDARY_AUTOFALLBACK,
-                toolLoopMode: TOOL_LOOP_MODE,
-                allowedToolNames,
-                toolSchemaMap,
-                toolLoopGuard,
-                toolMapper,
-                toolSessionId,
-                shouldEmitToolUpdates: SHOULD_EMIT_TOOL_UPDATES,
-                proxyExecuteToolCalls: PROXY_EXECUTE_TOOL_CALLS,
-                suppressConverterToolEvents: SUPPRESS_CONVERTER_TOOL_EVENTS,
-                toolRouter,
-                responseMeta: { id, created, model },
-                passThroughTracker,
-                onToolUpdate: (update) => {
-                  res.write(formatToolUpdateEvent(update));
-                },
-                onToolResult: (toolResult) => {
-                  res.write(`data: ${JSON.stringify(toolResult)}\n\n`);
-                },
-                onInterceptedToolCall: (toolCall) => {
-                  emitToolCallAndTerminate(toolCall);
-                },
-                onFallbackToLegacy: (error) => {
-                  boundaryContext.activateLegacyFallback("handleToolLoopEvent.close", error);
-                },
-              });
-              if (result.terminate) {
-                if (!result.terminate.silent) {
-                  emitTerminalAssistantErrorAndTerminate(result.terminate.message);
-                } else {
-                  // Silent termination: just end the stream without an error message
-                  streamTerminated = true;
-                  try { child.kill(); } catch { /* ignore */ }
-                }
-                break;
-              }
-              if (result.intercepted) {
-                break;
-              }
-              if (result.skipConverter) {
-                continue;
-              }
-            }
-
-            if (streamTerminated || res.writableEnded) {
-              break;
-            }
-            for (const sse of converter.handleEvent(event)) {
-              res.write(sse);
-            }
-          }
-          if (streamTerminated || res.writableEnded) {
-            return;
-          }
-
-          perf.mark("request:done");
-          perf.summarize();
-          const stderrText = Buffer.concat(stderrChunks).toString().trim();
-          log.debug("cursor-agent completed (node stream)", {
-            code,
-            stderrChars: stderrText.length,
-          });
-          if (code !== 0) {
-            const errSource =
-              stderrText
-              || `cursor-agent exited with code ${String(code ?? "unknown")} and no output`;
-            const parsed = parseAgentError(errSource);
-            const msg = formatErrorForUser(parsed);
-            const errChunk = createChatCompletionChunk(id, created, model, msg, true);
-            res.write(`data: ${JSON.stringify(errChunk)}\n\n`);
-            res.write(formatSseDone());
-            streamTerminated = true;
-            res.end();
-            return;
-          }
-
-          // Emit toast for passed-through MCP tools
-          const passThroughSummary = passThroughTracker.getSummary();
-          if (passThroughSummary.hasActivity) {
-            await toastService.showPassThroughSummary(passThroughSummary.tools);
-          }
-          if (passThroughSummary.errors.length > 0) {
-            await toastService.showErrorSummary(passThroughSummary.errors);
-          }
-
-          const doneChunk = {
-            id,
-            object: "chat.completion.chunk",
-            created,
-            model,
-            choices: [
-              {
-                index: 0,
-                delta: {},
-                finish_reason: "stop",
-              },
-            ],
-          };
-          res.write(`data: ${JSON.stringify(doneChunk)}\n\n`);
-          if (usage) {
-            const usageChunk = createChatCompletionUsageChunk(id, created, model, usage);
-            res.write(`data: ${JSON.stringify(usageChunk)}\n\n`);
-          }
-          res.write(formatSseDone());
-          res.end();
+        child.on("close", (code) => {
+          childClosed = true;
+          childExitCode = code;
+          drainQueue();
         });
       }
     } catch (error) {

@@ -8,7 +8,7 @@ import {
   type StreamJsonEvent,
   type StreamJsonToolCallEvent,
 } from "./types.js";
-import { DeltaTracker } from "./delta-tracker.js";
+import { MixedDeltaTracker } from "./delta-tracker.js";
 
 export type AiSdkStreamPart =
   | {
@@ -34,44 +34,22 @@ export type AiSdkStreamPart =
     };
 
 export class StreamToAiSdkParts {
-  private readonly tracker = new DeltaTracker();
   private readonly toolArgsById = new Map<string, string>();
   private readonly startedToolIds = new Set<string>();
-  private sawAssistantPartials = false;
-  private sawThinkingPartials = false;
+  private readonly tracker = new MixedDeltaTracker();
 
   handleEvent(event: StreamJsonEvent): AiSdkStreamPart[] {
     if (isAssistantText(event)) {
-      const isPartial = typeof event.timestamp_ms === "number";
-      if (isPartial) {
-        const text = extractText(event);
-        if (text) {
-          this.sawAssistantPartials = true;
-          return [{ type: "text-delta", textDelta: text }];
-        }
-        return [];
-      }
-      if (this.sawAssistantPartials) {
-        return [];
-      }
-      const delta = this.tracker.nextText(extractText(event));
+      const text = extractText(event);
+      if (!text) return [];
+      const delta = this.tracker.nextText(text);
       return delta ? [{ type: "text-delta", textDelta: delta }] : [];
     }
 
     if (isThinking(event)) {
-      const isPartial = typeof event.timestamp_ms === "number";
-      if (isPartial) {
-        const text = extractThinking(event);
-        if (text) {
-          this.sawThinkingPartials = true;
-          return [{ type: "text-delta", textDelta: text }];
-        }
-        return [];
-      }
-      if (this.sawThinkingPartials) {
-        return [];
-      }
-      const delta = this.tracker.nextThinking(extractThinking(event));
+      const text = extractThinking(event);
+      if (!text) return [];
+      const delta = this.tracker.nextThinking(text);
       return delta ? [{ type: "text-delta", textDelta: delta }] : [];
     }
 

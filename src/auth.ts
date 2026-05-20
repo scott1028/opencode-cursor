@@ -6,7 +6,7 @@ import { homedir, platform } from "os";
 import { join } from "path";
 import { createLogger } from "./utils/logger";
 import { stripAnsi } from "./utils/errors";
-import { resolveCursorAgentBinary } from "./utils/binary.js";
+import { formatShellCommandForPlatform, resolveCursorAgentBinary } from "./utils/binary.js";
 
 const log = createLogger("auth");
 
@@ -76,7 +76,7 @@ export async function startCursorOAuth(): Promise<{
   return new Promise((resolve, reject) => {
     log.info("Starting cursor-cli login process");
 
-    const proc = spawn(resolveCursorAgentBinary(), ["login"], {
+    const proc = spawn(formatShellCommandForPlatform(resolveCursorAgentBinary()), ["login"], {
       stdio: ["pipe", "pipe", "pipe"],
       shell: process.platform === "win32",
     });

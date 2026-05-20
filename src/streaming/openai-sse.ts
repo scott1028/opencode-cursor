@@ -8,7 +8,7 @@ import {
   type StreamJsonEvent,
   type StreamJsonToolCallEvent,
 } from "./types.js";
-import { DeltaTracker } from "./delta-tracker.js";
+import { MixedDeltaTracker } from "./delta-tracker.js";
 
 type OpenAiToolCall = {
   index: number;
@@ -60,12 +60,7 @@ export class StreamToSseConverter {
   private readonly id: string;
   private readonly created: number;
   private readonly model: string;
-  private readonly tracker = new DeltaTracker();
-  // Events with timestamp_ms carry delta text; events without carry accumulated text.
-  // DeltaTracker handles accumulated text only. When partials (delta) were seen,
-  // the final accumulated event must be skipped to prevent 2x duplication.
-  private sawAssistantPartials = false;
-  private sawThinkingPartials = false;
+  private readonly tracker = new MixedDeltaTracker();
 
   constructor(model: string, options?: { id?: string; created?: number }) {
     this.model = model;
@@ -75,36 +70,16 @@ export class StreamToSseConverter {
 
   handleEvent(event: StreamJsonEvent): string[] {
     if (isAssistantText(event)) {
-      const isPartial = typeof event.timestamp_ms === "number";
-      if (isPartial) {
-        const text = extractText(event);
-        if (text) {
-          this.sawAssistantPartials = true;
-          return [this.chunkWith({ content: text })];
-        }
-        return [];
-      }
-      if (this.sawAssistantPartials) {
-        return [];
-      }
-      const delta = this.tracker.nextText(extractText(event));
+      const text = extractText(event);
+      if (!text) return [];
+      const delta = this.tracker.nextText(text);
       return delta ? [this.chunkWith({ content: delta })] : [];
     }
 
     if (isThinking(event)) {
-      const isPartial = typeof event.timestamp_ms === "number";
-      if (isPartial) {
-        const text = extractThinking(event);
-        if (text) {
-          this.sawThinkingPartials = true;
-          return [this.chunkWith({ reasoning_content: text })];
-        }
-        return [];
-      }
-      if (this.sawThinkingPartials) {
-        return [];
-      }
-      const delta = this.tracker.nextThinking(extractThinking(event));
+      const text = extractThinking(event);
+      if (!text) return [];
+      const delta = this.tracker.nextThinking(text);
       return delta ? [this.chunkWith({ reasoning_content: delta })] : [];
     }
 
